@@ -1,150 +1,278 @@
 #include <stdio.h>
 #include <assert.h>
-#include <math.h>
+#include <stdlib.h>
 
 #include "dbg.h"
+#include "bstrlib.h"
+#include "mac1.h"
 
 #define MAX_DATA 256
+#define SAMPLES 15
 typedef unsigned char byte;
 
+bstring char_in_buffer;   /* Char input buffer. */
+bstring char_out_buffer;  /* Char output buffer. */
+bstring bit_in_buffer;    /* Bit input buffer. */
+bstring bit_out_buffer;   /* Bit output buffer. */
+bstring sample_buffer;    /* Bits conerted to samples. */
 
-unsigned int get_bit(byte n, int bitnum){
+/* Description: Read an int and return the indicated bit.
+ * Author: Unknown
+ * Date: Unknown
+ */
+unsigned int mask_bit(unsigned int n, int bitnum){
   return (n & (1 << bitnum)) >> bitnum;;
 }
 
-int chars_to_bits(char *in, char *out)
+/* Description: Read a char and return the string of 8 bits it consists of.
+ * Author: Albin Severinson
+ * Date: 26/02/15
+ */
+char *get_bits(char n)
 {
-  FILE *in_file = NULL;
-  FILE *out_file = NULL;
+  char bits[8] = {0};
+  int i = 0;
+  for(i = 0;i < 8;i++){
+    bits[i] = mask_bit(n, i);
+  }
+  return bits;
+}
 
+/* Description: Read chars from a file and store in buffer.
+ * Author: Albin Severinson
+ * Date: 19/02/15
+ */
+int read_chars(char *in)
+{
+  assert(in && "Invalid file handle when loading chars.");
+  int rc = 0;
+
+  FILE *in_file = NULL;
+  struct bStream *stream = NULL;
+
+  //Open the input file
   in_file = fopen(in, "r");
   check(in_file, "Failed to open input file.");
 
-  out_file = fopen(out, "w");
-  check(out_file, "Failed to open output file.");
+  //Open as a bStream
+  stream = bsopen((bNread) fread, in_file);
+  check(stream, "Failed to open the bStream.");
 
-  debug("Storing %s as bits in %s.", in, out);
-  debug("Buffer length: %d", MAX_DATA);
+  char_in_buffer = bfromcstr("");
 
-  //Buffer for storing the chars read from file
-  byte buffer[MAX_DATA] = {0};
+  //Read chars into memory
+  rc = bsreadln(char_in_buffer, stream, '\n');
+  check(rc == BSTR_OK, "Failed to read chars into memory.");
 
-  //Buffer for storing the bits for every char. Must be 8 times larger.
-  char bit_buffer[MAX_DATA * 8] = {0};
+  //Trim whitespace
+  check(btrimws(char_in_buffer) == BSTR_OK, "Failed to trim whitespace.");
 
-  unsigned int bit = 0;
-  int len = 0;
-  int i = 0;
-  int j = 0;
+  debug("Buffer: %s", bdata(char_in_buffer));
 
-  //Read chars from the file
-  while((len = fread(buffer, sizeof(byte), MAX_DATA - 1, in_file)) > 0){
-
-    //Convert the buffer to bits
-    for(i = 0;i < len;i++){
-      printf("%c -> ", buffer[i]);
-      for(j = 0;j < 8;j++){
-        bit = get_bit(buffer[i], j);
-        printf("%d", bit);
-
-        //Convert to ASCII
-        if(bit == 0)  bit_buffer[i*8 + j] = '0';
-        else if(bit == 1) bit_buffer[i*8 + j] = '1';
-        else sentinel("Illegal bit value.");
-      }
-      printf("\n");
-
-    }
-    //Write the bits to file
-    fwrite(bit_buffer, sizeof(char), len * 8, out_file);
-  }
-
-  //Cleanup
-  fflush(out_file);
+  in_file = bsclose(stream);
   fclose(in_file);
-  fclose(out_file);
 
   return 0;
-
+  
  error:
-  if(in_file) fclose(in_file);
-  if(out_file) fclose(out_file);
+  bdestroy(char_out_buffer);
+  if(stream) in_file = bsclose(stream);
+  if(in) fclose(in_file);
   return -1;
 }
 
-int bits_to_chars(char *in, char *out)
+/* Description: Read a buffer of chars and convert to a bstring of bits.
+ * Author: Albin Severinson
+ * Date: 26/02/15
+ */
+int chars_to_bits()
 {
-  FILE *in_file = NULL;
-  FILE *out_file = NULL;
+  assert(char_in_buffer && "Char buffer can't be NULL when converting to bits.");
+  assert(char_in_buffer->mlen > 0 && "Char buffer must be filled when converting to bits.");
 
-  in_file = fopen(in, "r");
-  check(in_file, "Failed to open input file.");
-
-  out_file = fopen(out, "w");
-  check(out_file, "Failed to open output file.");
-
-  debug("Storing %s as chars in %s.", in, out);
-
-  //Buffer for storing bits read from file
-  char bit_buffer[MAX_DATA * 8 + 1] = {0};
-
-  //Buffer for storing the calculated ascii values
-  char buffer[MAX_DATA] = {0};
-
-  char bit = 0;
-  int len = 0;
+  int rc = 0;
   int i = 0;
   int j = 0;
   int k = 0;
+  char c = 0;
+  unsigned char crc = 0;
+
+  debug("Converting chars to bits.");
+
+  //Initialize the bit buffer
+  bit_out_buffer = bfromcstr("");
+  check(bit_out_buffer, "Failed to init the bit buffer.");
   
-  //Read the bits into bit_buffer
-  while((len = fread(bit_buffer, sizeof(char), MAX_DATA * 8, in_file)) > 0){
-    debug("Read %d bits.", len);
-    check(len % 8 == 0, "Must read bits in blocks of 8.");
+  //Read chars from the char buffer, convert to bits, and append to
+  //bit buffer
+  for(i = 0;(c = bchar(char_in_buffer, i)) != '\0';i++){
+    printf("%c -> ", c);
 
-    //Looping over bytes read
-    for(i = 0;i < len / 8;i++){
-
-      //Looping over the bits in every byte
-      for(j = 0;j < 8;j++){
-
-        //Convert the chars read into ones and zeros
-        if(bit_buffer[i*8 + j] == '0') bit = 0;
-        else if(bit_buffer[i*8 + j] == '1') bit = 1;
-
-        printf("%d", bit);
-
-        //Calculate the value of the current bit
-        for(k = 0;k < j;k++) bit *= 2;
-
-        //Add the value to the buffer slow
-        buffer[i] += bit;
-      }
-      printf(" -> %c\n", buffer[i]);
+    //Convert a char to bits
+    for(j = 0;j < 8;j++){
+      rc = binsertch(bit_out_buffer, i*8 + j, 1, mask_bit(c, j));
+      check(rc == BSTR_OK, "Failed to append bits.");
+      printf("%d", bchar(bit_out_buffer, i*8 + j));
     }
-    
-    //Write the chars to file
-    fwrite(buffer, sizeof(char), len / 8, out_file);
+
+    //Add to CRC
+    crc += c;
+
+    printf("\n");
   }
 
-  //Cleanup
-  fflush(out_file);
-  fclose(in_file);
-  fclose(out_file);
+  printf("CRC: %d -> ", crc);
+
+  //Append the CRC
+  for(k = 0;k < 8;k++){
+    rc = binsertch(bit_out_buffer, i*8 + k, 1, mask_bit(crc, k));
+    check(rc == BSTR_OK, "Failed to append CRC.");
+    printf("%d", bchar(bit_out_buffer, i*8 + k));
+  }
+  printf("\n");
+
+  printf("Bit output buffer: ");
+  for(i = 0;i < blength(bit_out_buffer);i++){
+    printf("%d", bchar(bit_out_buffer, i));
+  }
+  printf("\n");
 
   return 0;
 
  error:
-  if(in_file) fclose(in_file);
-  if(out_file) fclose(out_file);
-
-  return -1;  
+  bdestroy(bit_out_buffer);
+  return -1;
 }
 
+/* Description: Sample a bit with simulated noise added, and attempt
+ * to average out the noise.
+ * Author: Albin Severinson
+ * Date: 19/02/15
+ */
+char get_next_bit(int n)
+{
+  int i = 0;
+  char c = 0;
+  double d = 0;
+
+  c = bchar(bit_out_buffer, n);
+  
+  //Read bits from the bit out buffer, convert to samples and add noise.
+  for(i = 0;i < SAMPLES;i++){
+
+    //Multiply with 100 and add noise
+    d += c * 100;
+
+    //TODO better noise generation
+    d += ((random() % 200) - (random() % 200));
+  }
+
+  d = d / SAMPLES;
+  //printf("[%f]", d);
+  if(d > 50) return 1;
+  else return 0;
+}
+
+/* Description: Read a bstring of bits and attempt to reconstruct the data.
+ * Author: Albin Severinson
+ * Date: 19/02/15
+ */
+int bits_to_chars()
+{
+  assert(bit_out_buffer && "Bit output buffer must be filled when converting to chars.");
+  assert(blength(bit_out_buffer) > 0 && "But output buffer must be filled when converting to chars.");
+  assert(blength(bit_out_buffer) % 8 == 0 && "Bit buffer size must be a multiple of 8.");
+
+  int rc = 0;
+  int i = 0;
+  int j = 0;
+  int k = 0;
+  char c = 0;
+  unsigned char crc = 0;
+  unsigned char got_crc = 0;
+  int measured_bit = 0;
+  int real_bit = 0;
+  int bit_error = 0;
+
+  debug("Converting bits to chars.");
+
+  //Init the output buffer
+  char_out_buffer = bfromcstr("");
+  check(char_out_buffer, "Failed to init char output buffer.");
+
+  //Add up the bits in every byte to a char
+  for(i = 0;i < blength(bit_out_buffer) / 8;i++){
+    c = 0;
+
+    //Read 8 bits at a time
+    for(j = 0;j < 8;j++){
+
+      //Get the real bit for comparison
+      real_bit = bchar(bit_out_buffer, i*8 + j);
+
+      //Get the measured bit
+      measured_bit = get_next_bit(i*8 + j);
+      printf("%d", measured_bit);
+
+      //Check for bit errors
+      if(real_bit != measured_bit) bit_error++;
+
+      //Calculate the value of the current bit
+      for(k = 0;k < j;k++) measured_bit *= 2;
+      
+      //Add up
+      c += measured_bit;
+    }
+    printf(" -> %c\n", c);
+
+    //Append char to buffer
+    rc = binsertch(char_out_buffer, i, 1, c);
+    check(rc == BSTR_OK, "Failed to append char.");
+
+    //Add to CRC
+    crc += c;
+  }
+
+  //Get the CRC that was sent along the data
+  got_crc = bchar(char_out_buffer, i - 1);
+
+  //Subtract that from the computed CRC, since the crc isn't part of
+  //the sum when calculated on the sender side.
+  crc -= got_crc;
+
+  printf("Computed CRC: %d / Got CRC: %d", crc, got_crc);
+  printf(" [%d bit(s) in error]\n", bit_error);
+
+  //Check if the CRC matches
+  if(crc != got_crc){
+    printf("CRC failed! Re-reading buffer.\n");
+    //TODO: Re-read the buffer if this fails.
+  }
+
+  printf("Char output buffer: ");
+  for(i = 0;i < blength(char_out_buffer);i++){
+    printf("%c", bchar(char_out_buffer, i));
+  }
+  printf("\n");
+
+  return 0;
+
+ error:
+  bdestroy(char_out_buffer);
+  return -1;
+}
 
 int main(int argc, char *argv[])
 {
   int rc = 0;
-  rc = chars_to_bits("in_file.txt", "out_file.txt");
-  rc = bits_to_chars("out_file.txt", "char_file.txt");
+  rc = read_chars("in_file.txt"); 
+  rc = chars_to_bits();
+  rc = bits_to_chars();
+
+  //Send to MAC1 layer
+  rc = send_bstring(bit_out_buffer);
+  bstring recieved_bstring = get_bstring();
+  printf("Recieved bstring from MAC1: %s\n", bdata(recieved_bstring));
+
+  return rc;
 }
